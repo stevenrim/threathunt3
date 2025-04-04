@@ -10,51 +10,38 @@ hunting skills, analytical thinking, and investigative processes for professiona
 reflect or promote any actual security incidents or breache
 ```
 
-## Overview
-An employee named John Doe, working in a sensitive department, recently got put on a performance improvement plan (PIP). After John threw a fit, management has raised concerns that John may be planning to steal proprietary information and then quit the company. I was tasked to investigate John's activities on his corporate device `sjr-workstation` using Microsoft Defender for Endpoint (MDE) to ensure nothing suspicious took place.
+## 📂 Overview
+An employee named John Doe, working in a sensitive department, recently got put on a performance improvement plan (PIP). After John threw a fit, management raised concerns that John may be planning to steal proprietary information and then quit the company. I was tasked to investigate John's activities on his corporate device `sjr-workstation` using Microsoft Defender for Endpoint (MDE) to ensure nothing suspicious took place.
 
-## Hypothesis
+## 🔍 Hypothesis
 Following recent behavioral concerns regarding employee John Doe—who works in a sensitive department and was
 recently placed on a performance improvement plan—there is a possibility that he may attempt to exfiltrate
 proprietary data before leaving the organization.
 
 Given his administrator privileges on `sjr-workstation` and unrestricted access to
 applications, it is plausible that John could:
-- Download or run unauthorized scripts or tools,
-- Use compression utilities to collect and stage sensitive data,
+- Download or run unauthorized scripts or tools
+- Use compression utilities to collect and stage sensitive data
 - Attempt to transfer files to external destinations such as cloud services, personal email, or via network
 protocols outside of normal usage.
 
-## Data Collection
-To investigate potential insider threats involving John Doe, this hunt will focus on identifying suspicious
-activity related to file access, compression, and potential data exfiltration. Microsoft Defender for Endpoint
-(MDE) will be leveraged to gather telemetry from relevant logs, network traffic, and endpoint activity.
+## 📥 Data Collection
+To investigate potential data exfiltration activity, I collected telemetry from Microsoft Defender for Endpoint (MDE), focusing on:
+- `DeviceProcessEvents` to identify execution of compression tools (e.g., 7z.exe) and PowerShell-based scripting activity (e.g., -ExecutionPolicy Bypass).
+- `DeviceFileEvents` to track creation or modification of compressed files in staging locations such as C:\ProgramData\.
+- `DeviceNetworkEvents` to detect outbound connections to external destinations, particularly cloud storage endpoints.
 
-Data will be collected to inspect:
-- Process execution patterns, particularly involving scripting engines and compression utilities
-- File access behavior, including abnormal or bulk access to sensitive directories
-- Network connections, especially to cloud services or unrecognized external destinations
+## 🧠 Data Analysis
+Analysis of the collected telemetry revealed a clear timeline of suspicious activity on `sjr-workstation`. At
+6:45 PM, PowerShell was executed with `-ExecutionPolicy Bypass`, likely used to run an unsigned script. This was
+followed by the use of `7z.exe` to compress files containing employee data, which were staged in `C:\ProgramData\`.
+Just five seconds after the ZIP file was created, PowerShell established an outbound connection to an Azure
+Blob Storage endpoint, suggesting the compressed data was exfiltrated. The sequence, correlation of timestamps,
+use of staging directories, and script-based orchestration all point to deliberate file preparation and exfiltration activity.
 
-Key MDE tables utilized during the hunt include:
-- `DeviceFileEvents` – to monitor access to and creation of files
-- `DeviceProcessEvents` – to analyze execution of processes and scripts
-- `DeviceNetworkEvents` – to identify unusual outbound connections that may indicate exfiltration
+## 🕵️ Investigation
 
-## Data Analysis
-The goal of this stage was to validate the hypothesis by identifying patterns, anomalies, or potential indicators of data exfiltration from John Doe’s workstation (`sjr-workstation`).
-
-Using MDE’s advanced hunting capabilities, we queried key tables including DeviceProcessEvents,
-DeviceFileEvents, and DeviceNetworkEvents to look for:
-
-- Use of compression tools (e.g., tar, 7z, WinRAR, or PowerShell-based archiving commands).
-- File access, modification, creation, or deletion events.
-- Outbound network traffic to external or unauthorized destinations.
-
-We specifically focused on identifying evidence of file archiving or scripting activity that may indicate
-preparation for exfiltration. When any event resembling file compression or scripting was detected, we examined
-associated telemetry.
-
-**KQL Query**: Confirming John Doe(`johndoe678`) successfully logged on to `sjr-workstation`.
+### 1. KQL Query: Confirming John Doe(`johndoe678`) successfully logged on to `sjr-workstation`.
 ```kql
 DeviceLogonEvents
 | where DeviceName == "sjr-workstation"
@@ -62,87 +49,123 @@ DeviceLogonEvents
 | project Timestamp, DeviceId, DeviceName, ActionType, AccountName
 | order by Timestamp desc
 ```
-**KQL Query**: Searching for suspicious PowerShell activity. 
+![image](https://github.com/user-attachments/assets/ad275dd1-c88f-4010-b475-0c0613a400f4)
+<br>✅ A successful user logon was recorded just minutes before suspicious activity began. This provides
+attribution context and confirms interactive user activity on the device. 
+
+
+
+### 2. KQL Query: Detecting use of compression tools.
 ```kql
-union DeviceProcessEvents, DeviceNetworkEvents, DeviceFileEvents
-| where Timestamp >= datetime(2025-04-01T18:45:00Z)
+DeviceProcessEvents
+| where Timestamp >= datetime(2025-04-01T18:54:00Z)
 | where DeviceName == "sjr-workstation"
-| where ProcessCommandLine has_any ("powershell", "Invoke-WebRequest", "ExecutionPolicy", "Bypass", "ProgramData")
+| where ProcessCommandLine has_any ("tar", "7z", "7zip", "WinRAR", "rar", "Compress-Archive", "Expand-Archive")
 | project Timestamp, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, DeviceName
 | order by Timestamp asc
 ```
-**Observed Indicators of Compromise**
-<br>At 6:45:29 PM UTC, `powershell.exe` was executed with the `-ExecutionPolicy Bypass` flag and launched via `cmd.exe`. The command originated
-from a file on John Doe’s desktop and referenced a PowerShell script located in the `C:\ProgramData` directory — a non-standard and
-commonly abused location for staging files or payloads.
-
-Shortly after, at 6:45:39 PM UTC, a second PowerShell process was executed by `SenseIR.exe`, this time using the
-`-ExecutionPolicy AllSigned` flag. While this may indicate legitimate activity, its timing in close proximity to the first
-event raised suspicion and warranted additional review.
-
-Between 6:47 PM and 6:56 PM UTC, multiple executions of `SearchProtocolHost.exe` were observed, triggered by `searchindexer.exe`. Although
-this activity may reflect normal Windows indexing behavior, the timing suggests it could have been prompted by recent file
-modifications — potentially initiated by the PowerShell script.
+![image](https://github.com/user-attachments/assets/5225cfb1-8dc0-4492-b5d0-66a230c2f8cb)
+<br>✅ This log confirms that the compression utility `7z.exe` was launched by a PowerShell script (`exfiltratedata.ps1`) using an execution policy bypass. 
 
 
-## Investigation
-**KQL Query**: Investigating File Activity
+### 3. KQL Query: File access, creation, modification, or delation events.
 ```kql
 DeviceFileEvents
+| where Timestamp >= datetime(2025-04-01T18:54:00Z)
 | where DeviceName == "sjr-workstation"
-| where Timestamp >= datetime(2025-04-01T18:45:00Z)
-| project Timestamp, FileName, FolderPath, ActionType, InitiatingProcessFileName, InitiatingProcessCommandLine
+| where ActionType in~ ("FileCreated", "FileModified", "FileDeleted")
+| project Timestamp, FileName, FolderPath, ActionType, InitiatingProcessFileName, InitiatingProcessCommandLine, DeviceName
 | order by Timestamp asc
 ```
-**Analysis of Logs**
-Timestamps: All activity occurred starting just seconds after the initial PowerShell execution (around 6:45:33 PM UTC), which matches the expected timeline for post-script behavior.
+![image](https://github.com/user-attachments/assets/0188fc03-82b4-4034-8b6e-058d42bd8af0)
+<br>✅ The script archived a CSV file containing what appeared to be employee data into a ZIP file named
+`employee data-20250401225920.zip`. The ZIP file was successfully created in the `C:\ProgramData\` directory—a
+common staging location used by threat actors to temporarily hold files before exfiltration.
 
-Action Types:
-- `FileCreated` — shows that new files were generated, likely as part of script execution
-- `FileRenamed` — suggests manipulation of existing files, possibly to obfuscate activity or prepare data for further actions
 
-Many files were created or renamed in:
-- `AppData\Local\Temp` — a common staging location for scripts and temporary archive files
-- `AppData\Local\Microsoft\Edge` — indicating potential use of Edge or browser-based activity related to the script
-
-Process Involved:
-- All suspicious file actions were initiated by `powershell.exe` using the same bypassed execution policy as flagged earlier
-
-The logs confirmed that John Doe’s PowerShell script created and manipulated files shortly after execution, and used known staging directories such as Temp. While this doesn’t confirm compression specifically, it validates the hypothesis of data staging and
-supports continued investigation into archive creation or network exfiltration.
-
-<br>**KQL Query:** Investigate Network Activity
+### 4. KQL Query: Outbound network connections to external destinations.
 ```kql
 DeviceNetworkEvents
+| where Timestamp >= datetime(2025-04-01T18:54:00Z)
 | where DeviceName == "sjr-workstation"
-| where Timestamp >= datetime(2025-04-01T18:45:00Z)
-| project Timestamp, InitiatingProcessFileName, InitiatingProcessCommandLine, RemoteIP, RemoteUrl, RemotePort, Protocol, ReportId
+| where RemoteUrl != "" and isnotempty(RemoteUrl)
+| where RemotePort in (21, 22, 80, 443, 8080) // common exfil ports
+| project Timestamp, RemoteUrl, RemoteIP, RemotePort, InitiatingProcessFileName, InitiatingProcessCommandLine, DeviceName
 | order by Timestamp asc
 ```
-**Analysis of Logs**
-On April 1, 2025, at 8:13:36 PM UTC, the workstation `sjr-workstation` initiated a network request using powershell.exe. This command was executed with the `-ExecutionPolicy Bypass` flag, allowing it to circumvent PowerShell’s default script execution restrictions. It downloaded a remote script named `pwncrypt.ps1` from GitHub and saved it to the `C:\ProgramData` directory — a known staging location often used by threat actors to avoid scrutiny.
+![image](https://github.com/user-attachments/assets/eda0dd11-fafe-4867-8477-e6abedc3541c)
+<br>✅ This outbound connection to an Azure Blob Storage instance occurred just one second after the ZIP file
+was created. The process responsible was again `powershell.exe`, executing the same script
+(`exfiltratedata.ps1`). I also noticed that the zip file was exfiltrated externally over HTTPS.
 
-The request was made to IP address `185.199.111.133`, resolving to GitHub's raw content delivery infrastructure. This behavior strongly indicated an attempt to retrieve and stage a script potentially related to malicious activity. The filename `pwncrypt.ps1` suggested the script may have been designed for encryption or other offensive functions, possibly aligning with tactics associated with ransomware or credential theft.
+## 🛡️ Recommended Response Actions for SOC/IR Team
+### 1. Containment
+   - Isolate `sjr-workstation` from the network immediately.
+   - Terminate any active PowerShell sessions on the host.
+   - Block outbound access to `*.blob.core.windows.net` and `20.60.133.132`.
 
-This activity was highly suspicious due to:
-- Use of execution policy bypass
-- External script download from a public repository
-- Storage in an obfuscated directory
-- The suggestive naming convention of the script
+### 2. Eradication & Recovery
+   - Locate and remove `exfiltratedata.ps1`.
+   - Locate and remove any files matching `employee-data-*.zip` or `employee-data-*.csv` in `C:\ProgramData\`.
+   - Uninstall `7z.exe` if it is not officially sanctioned
+   - Reset credentials for the user `johndoe678`
+
+### 3. Forensic Follow-Up
+   - Capture a full disk image and volatile memory from the workstation.
+   - Review PowerShell logs and Scheduled Tasks for signs of persistence.
+   - Correlate logs across systems to investigate lateral movement.
+
+### 4. Mitigation & Monitoring
+   - Deploy EDR rules to flag PowerShell executions with `-ExecutionPolicy Bypass`.
+   - Enable alerting for access to `ProgramData` and use of compression utilities.
+   - Monitor outbound HTTPS activity to non-sanctioned destinations.
 
 
-<br>3. Validate the Origin of SenseIR.exe
-Goal: Determine if SenseIR.exe is part of a legitimate tool or potentially unwanted software.
-```kql
-```
+## 🔄 Improvements
+### Security Posture Improvements (Prevention)
+The activity observed in this hunt — PowerShell scripting, file compression, and data exfiltration — could have been mitigated or detected earlier through the following improvements:
 
+- Restrict PowerShell execution policies across endpoints using Group Policy or endpoint hardening tools.
 
-<br>4. Look for Archive Tool Use
-Goal: Confirm if John used tools like 7z.exe, winrar.exe, etc., possibly to compress data before exfiltration.
-```kql
-```
+- Implement application allowlisting to prevent unauthorized tools like `7z.exe` from running if not deployed by IT.
 
+- Deploy DLP (Data Loss Prevention) policies to alert or block attempts to move sensitive files (e.g., employee data) to untrusted paths or external destinations.
 
+- Enable full command-line auditing for PowerShell and CMD to provide better visibility in EDR/SIEM.
 
+- Use Defender Attack Surface Reduction (ASR) rules to block or log suspicious scripting behaviors, especially in known staging directories like `C:\ProgramData\`.
+
+### Hunting Process Refinement
+
+This hunt was successful, but there are opportunities to sharpen our strategy for future hunts:
+
+- Automate timeline correlation between process, file, and network events using KQL joins and visualization tools. This would speed up the investigation.
+
+- Standardize tags and bookmarks in Defender for faster triage of scripts, outbound connections, and binaries like `7z.exe`.
+
+- Proactively search for staging paths (e.g., `ProgramData`, `AppData\Local\Temp`) — attackers commonly use these directories.
+
+- Broaden search patterns to include lesser-known scripting platforms (like VBScript, WScript, etc.) for potential alternate exfiltration paths.
+
+## 🧾 Summary
+### Findings
+The hunt provided strong support for the hypothesis. The following activities were identified:
+
+- PowerShell script execution using `-ExecutionPolicy Bypass`, which allows unsigned or malicious scripts to run — a known method to evade standard execution restrictions.
+
+- Use of `7z.exe`, a legitimate compression tool, to create a ZIP archive containing sensitive employee data. This file was created in `C:\ProgramData\`, a directory commonly used by threat actors to stage files without drawing attention.
+
+- An outbound HTTPS connection was made to an Azure Blob Storage endpoint within seconds of the archive being created, strongly indicating the file was exfiltrated.
+
+- The entire sequence was tied to the user account `johndoe678` (John Doe), and occurred shortly after he successfully logged into the device.
+
+### Conclusion
+The threat hunt confirms that John Doe leveraged his elevated privileges to:
+
+- Run unauthorized PowerShell scripts
+- Use external compression utilities
+- Stage and likely exfiltrate sensitive data to a personal cloud storage service
+
+These actions directly align with the risk outlined in the hypothesis and represent malicious insider behavior or at minimum, a serious violation of acceptable use and data handling policies.
 
 
