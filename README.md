@@ -1,5 +1,3 @@
-# UNDER CONSTRUCTION!!!
-
 # Threat Hunt Report: Data Exfiltration from PIP'd Employee
 ```
 ⚠️ Disclaimer: This repository and github site presents fictional threat hunting scenarios created for
